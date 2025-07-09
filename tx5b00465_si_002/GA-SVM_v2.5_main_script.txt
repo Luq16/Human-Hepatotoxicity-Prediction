@@ -1,0 +1,401 @@
+##########################################################################
+##########################################################################
+#
+#   This is a R script. Please change the file extension to .r to use the file properly.
+#   On notes how to use this file please see the file GA-SVM_v2.5_main_script.txt (or .r) 
+#
+#   This script was written by Dr. Denis Mulliner and published as supporting material 
+#   to a publication titled "Computational Models for Human and Animal Hepatotoxicity with a Global Application Scope"
+#   Author: Mulliner, Denis; Schmidt, Friedemann; Stolte, Manuela; Spirkl, Hans-Peter; Czich, Andreas; Amberg, Alexander
+#   published in the Journal of Chemical Research in Toxicology in 2016.
+#   Please cite what using this script!
+#
+##########################################################################
+##########################################################################
+
+cat("\n\n")
+cat("-----------------------------------------------------------------------\n")
+cat("--- this is GA-SVM_v2.5.r            VERSION 2.5 (December 2014)     --\n")
+cat("---   building support vector machine (SVM) models using a           --\n")
+cat("---   a genetic algorithm (GA) for feature selection                 --\n")
+cat("-----------------------------------------------------------------------\n")
+cat("\n\n")
+############################
+## WHAT DOES THIS SCRIPT DO AND HOW IS IT DONE?
+##
+##  Main functionality and background
+##
+##      This script was written to building support vector machine models
+##      using a genetic algorithm for feature selection.
+##      Original purpos was to build classification models
+##      for binary toxicity endpoints using a large set of
+##      diverse chemical descriptors (>500).
+##      This script is optimized for this job and might lack the
+##      flexibility to be applied to other modeling tasks.
+##
+##
+##  Additional notes
+##      1.The wording throughout this script is matched to its original use:
+##      independent variables are called descriptors, the dependent variable
+##      is called endpoint and every row of the main data frames contains
+##      a chemical compound having an ID...
+##
+##      2. This script gradually grew with its aplication. It is not at all built in
+##      a consistant and planed fashion. I'm sorry for that. It complicates the matter
+##      a lot by assuming a lot of knowledge about the procedure and introducing a
+##      lot of inconsistant naming conventions and folder organisation.
+##      But hey, it works like a charm (for me)!
+##      -- Denis
+
+
+## MANUAL (9. Dez. 2014) by Denis Mulliner
+##
+## 1. General usage
+##
+##  The script is ment to be run on a grid engine since it can take quite a
+##  while to finish its job. There are a lot of things to define for a
+##  run and therefore this is usually done with a small start script defining
+##  all necessary settings and parameters and in the end calling this script.
+##  Further down a example start script is provided.
+##
+##  The two major jobs of this script are 1) optimizing a model and 2) evaluating
+##  the model. Since 1) is an iterative process an output will keep you informed
+##  about the current status of the job (and enables you to restart from the last
+##  output). The evaluation will be run after the optimization.
+##
+## 2. Example input file with all settings explained:
+##    (Some settings might be missing but in this case they are unimportant)
+##
+if (FALSE) { ## this line is simply there to avoid commenting out all the following lines!
+###################################
+## input file for GA-SVM_V2.5
+## by Denis Mulliner
+
+## general settings
+DEBUG=F # default DEBUG=F; DEBUG=T for a lot more text info on what is done to check for errors
+
+
+# FILENAME: This is the master file name. It will be used to construct
+# a base name (cutting away the .r suffix) which will be the base for all
+# output file names and for the loaded file if continuing a run!
+# e.g. FILENAME="X.r"
+#  --> [base name]=X and the following will be generated
+#  [base name]_runs_1_mean_best.txt containing a list of the mean and the best fitnes for evey iteration
+#  [base name]_runs_1_population.txt containing the final population of a run
+#  and so on ...
+FILENAME="test.r"
+
+##
+## Descriptor files must have the following format:
+## space seperated text file with header for every column
+## First column: unique compound ID, header should be
+##               defined but name does not matter because it
+##               will be set to ID
+## ALL Other Columns: the descriptors with a uniq header each
+#DESCRIPTOR.FILES="datasets/test_A" ## here using one set of compounds
+DESCRIPTOR.FILES=c("datasets/test_A","datasets/test_B") ## here using 2 sets of compounds
+DESCRIPTOR.postfixes=c("xx","yy","zz")
+
+##
+## The files containing the Toxicity data mut have the following format
+## Tab seperated text file with a header for every column
+## First column: unique compound ID, header should be
+##               defined but name does not matter because it
+##               will be set to ID anyway
+## ALL Other Columns: numeric or binary endpoint data.
+##                    if column is binary values must be 0 and 1.
+#TOXICITY.FILES="datasets/test_tox_A.txt" ## here using one set of compounds
+TOXICITY.FILES=c("datasets/test_tox_A.txt","datasets/test_tox_B.txt") ## here using two sets of compounds
+ENDPOINT="Y_class"
+NUMERIC.ENDPOINT=F # use: NUMERIC.ENDPOINT=T if a a regression should be done
+                   # use: NUMERIC.ENDPOINT=F (default) if a classification model should be built
+
+##
+## The file(s) containing the data set split information
+## must have the following format:
+## First column: unique compound ID, header should be
+##               defined but name does not matter because it
+##               will be set to ID anyway
+## ALL Other Columns: one of the values:
+##                    "train" (use compound for model training)
+##                    "test"  (use compound for model testing during feature selection)
+##                    "val"   (use compound for model validation after each run of the genetic algorithm)
+# TRAIN.TEST.SPLIT.FILES="datasets/test_A_SET.txt" ## here using one set of compound
+TRAIN.TEST.SPLIT.FILES=c("datasets/test_A_SET.txt","datasets/test_B_SET.txt")  ## here using two set of compound
+SET.column.header="Y_SET_1" # defines the header of the column to use
+
+##
+## SVM Settings
+##
+svm.type="nu-classification"  ## other possible options:
+kernel.type="radial"          ## other possible options: polynomial
+                              ##                         linear
+tolerance=0.01                ## a numeric value. for more info see manual of the
+                              ## e1071 package containing the svm function
+epsilon=0.1                   ## a numeric value. for more info see manual of the
+                              ## e1071 package containing the svm function
+NU=0.7                        ## a numeric value. for more info see manual of the
+                              ## e1071 package containing the svm function
+GAMMA=0.01                    ## a numeric value. for more info see manual of the
+                              ## e1071 package containing the svm function
+
+##
+## genetic algorithm settings
+pS = 20           ## population size (minimum 5); I used 1000 in most runs
+iter = 10         ## number of iterations befor output is generated
+Nruns = 5         ## number of runs repiting the specified number of iterations (iter) each time
+N.desc = 10       ## number of descriptors choosen in first run
+MUTATION=0.01     ## mutation rate used in the genetic algorithm
+PROBABILITY=T     ## only for classification models
+                  ## default: PROBABILITY=F  using the SVM model classification output
+                  ##                         and fitness will be measured with ACC (Accuracy)
+                  ##                         of classification with AUC=#N(correct classifications)/#N(total number of classifications)
+                  ##       if PROBABILITY=T  use probability value
+                  ##                         calculated by the SVM model to evaluate
+                  ##                         predictive performance. So for fitness
+                  ##                         the AUC (area under ROC curve)
+                  ##                         will be used!
+testweight=1.05   ## defining the weight of train and test set performance for
+                  ## calculating the fitness
+                  ## fitness = a*fitness(TEST) + (2-a)*fitness(train)
+                  ## with a=testweight!
+penalty=NA        ## default=NA; this can be used to penelize a choice of too many
+                  ## descriptors and force the optimization towards less descriptors
+                  ## penalty should be a numeric vector of length 2 e.g. c(40,0.5)
+                  ## the penalty is introduced by reducing the fitness
+                  ## if #N(number of descriptors > penalty[1]
+                  ## by [ (#N(number of descriptors)-penalty[1])*penalty[2] ]^2
+                  ## WARNING: this option was not well tested and not used regularly!
+
+
+
+## cross-validation options
+CROSSVAL=F ## default; if CROSSVAL=T fitness of an individual will not be calculated from
+           ##          training and test set but using train+test compounds to build
+           ##          the model and a cross-validation to test the model
+Nfold=10   ## da a N-fold cross-validation
+LOOCV=F    ## default; LOOCV=T: only effective when CROSSVAL=T; will do a leave one out
+           ##          cross-validation. This is very time consuming and should not
+           ##          be the choice for large optimizations
+
+## PROCESS:
+LOAD=F    ## default: LOAD=F; LOAD=T will try to load last run of optimization
+          ##                  based on the FILENAME base name
+OPT=T     ## default: OPT=F; OPT=T do an optimization run
+EVAL=T    ## default: EVAL=F; EVAL=T evaluate the model output.
+          ## if EVAL=T and OPT=F a model must be loaded that than can be evaluated
+
+## using a default set of descriptors
+#use.these.descriptors="test_descriptor_set.txt" ## this option runs a pseudo optimization
+                                                ## using only the descriptor subset
+                                                ## specified in the given text file
+                                                ## with one descriptor name (header in descriptor files)
+                                                ## per line and no headers!
+                                                ## This will automatically set
+                                                ## POP.EVAL=F and LOAD=F, they are not used!
+
+APPLICABILITY=F  ## default; if APPLICABILITY=T an applicability domain
+                 ##          analysis is run based on an euclidean distance calculation
+                 ##          with the selected descriptors.
+                 ##          so far this has not lead to any improvement
+                 ##          so it is not default!
+
+ADDITIONAL.MODELS=F ## default is FALSE; if ADDITIOnAL.MODELS=T than produce a lot of additional models
+                    ##                   using all train, test and validation compounds for model training
+                    ##                   and a pruning of the chosen descriptor set
+POP.EVAL=T  ## default: POP.EVAL=F; if POP.EVAL=T the population is evaluated at
+            ##                      the end of each run checking individuals for
+            ##                      overlap and giving a feel for the optimization status
+            ##                      of the model
+
+## now loading the GA-SVM script and start running
+source("~/Statistics/SVM/GA-SVM_v2.5_main_script.r")
+q(save="no")
+} ### This is the end of the explanatory input file!
+## To use this file copy the text to input.r and do   > Rscript input.r
+## For a first trial run use the following script to produce some fake data
+## in the subfolder dataset/
+if (FALSE) {
+## Make fake input for GA-SVM script
+A.size=200 # size of dataset A
+B.size=50  # size of dataset B
+## make fake tox data
+A.tox <- data.frame("xIDx"=paste("X",1:A.size,sep=""),"X_class"=round(runif(A.size),digits=3),"Y_class"=as.integer(round(runif(A.size),digits=0)))
+write.table(A.tox,file="test_tox_A.txt",row.names=F,sep="\t")
+B.tox <- data.frame("xIDx"=paste("Y",1:B.size,sep=""),"X_class"=round(runif(B.size),digits=3),"Y_class"=as.integer(round(runif(B.size),digits=0)))
+write.table(B.tox,file="test_tox_B.txt",row.names=F,sep="\t")
+# make fake descriptors
+A.xx <- data.frame("xIDx"=paste("X",1:A.size,sep=""),"X1"=runif(A.size))
+for (i in 2:10) {A.xx[,ncol(A.xx)+1] <- runif(A.size); colnames(A.xx)[ncol(A.xx)] <- paste("X",i,sep="")}
+write.table(A.xx,file="test_A.xx",row.names=F,sep=" ")
+A.xx <- data.frame("xIDx"=paste("X",1:A.size,sep=""),"Y1"=runif(A.size))
+for (i in 2:10) {A.xx[,ncol(A.xx)+1] <- runif(A.size); colnames(A.xx)[ncol(A.xx)] <- paste("Y",i,sep="")}
+write.table(A.xx,file="test_A.yy",row.names=F,sep=" ")
+A.xx <- data.frame("xIDx"=paste("X",1:A.size,sep=""),"Z1"=runif(A.size))
+for (i in 2:10) {A.xx[,ncol(A.xx)+1] <- runif(A.size); colnames(A.xx)[ncol(A.xx)] <- paste("Z",i,sep="")}
+write.table(A.xx,file="test_A.zz",row.names=F,sep=" ")
+#
+B.xx <- data.frame("xIDx"=paste("Y",1:B.size,sep=""),"X1"=runif(B.size))
+for (i in 2:10) {B.xx[,ncol(B.xx)+1] <- runif(B.size); colnames(B.xx)[ncol(B.xx)] <- paste("X",i,sep="")}
+write.table(B.xx,file="test_B.xx",row.names=F,sep=" ")
+B.xx <- data.frame("xIDx"=paste("Y",1:B.size,sep=""),"Y1"=runif(B.size))
+for (i in 2:10) {B.xx[,ncol(B.xx)+1] <- runif(B.size); colnames(B.xx)[ncol(B.xx)] <- paste("Y",i,sep="")}
+write.table(B.xx,file="test_B.yy",row.names=F,sep=" ")
+B.xx <- data.frame("xIDx"=paste("Y",1:B.size,sep=""),"Z1"=runif(B.size))
+for (i in 2:10) {B.xx[,ncol(B.xx)+1] <- runif(B.size); colnames(B.xx)[ncol(B.xx)] <- paste("Z",i,sep="")}
+write.table(B.xx,file="test_B.zz",row.names=F,sep=" ")
+# make fake test training set split data
+B.set <- data.frame("xIDx"=paste("Y",1:B.size,sep=""),"Y_SET_1"=c(rep("train",B.size-20),rep("test",10),rep("val",10))
+                                                     ,"Y_SET_2"=c(rep("train",B.size-10),rep("test",5),rep("val",5)))
+write.table(B.set,file="test_B_SET.txt",row.names=F,sep="\t")
+A.set <- data.frame("xIDx"=paste("X",1:A.size,sep=""),"Y_SET_1"=c(rep("train",A.size-100),rep("test",50),rep("val",50))
+                                                     ,"Y_SET_2"=c(rep("train",A.size-50),rep("test",25),rep("val",25)))
+write.table(A.set,file="test_A_SET.txt",row.names=F,sep="\t")
+q(save="no")
+######## done !!
+} ## end of script to make some fake input data for testing
+
+
+###
+## The output:
+## most important output is the model file with the postfix [base name][suffix].RData
+## This is a binary R format file including the SVM model object
+## with the name "model". It can be loaded with the R function load([filename])
+## and than used to predict new compounds with the fundtion predicte(model,...)
+## All other output is used to evaluate the model
+##
+## Currently there is no good grid search implemented to find best GA and SVM parameters
+## like tolerance, gamma, nu, population size, etc. Sorry, but i never had the time!
+
+
+
+SYSTEM <- Sys.info()["sysname"]
+SYSTEM
+
+HOME <- getwd()
+cat("my HOME is my caslte and: ",HOME,"\n")
+
+## check the predifined variables
+## WHAT TO DO?
+if (!exists("OPT")) {OPT=F; cat("no model optimization! if you would like to optimize a model specify OPT=T\n")}
+if (!exists("EVAL")) {EVAL=F; cat("no model evaluation! if you would like to evaluate a model specify EVAL=T\n")}
+if (EVAL&!OPT) {LOAD=T}
+## SETTINGS FOR LOADING DATA
+if (!exists("DESCRIPTOR.FILES")) {cat("DESCRIPTOR.FILES not defined, please give first name of descriptor files. \n           e.g. ~/Data/dataset to load ~/Data/dataset.[name of descriptor set] files\n");q(save="no")}
+if (!exists("DESCRIPTOR.postfixes")) {cat("DESCRIPTOR.postfixes not defined, please give postfixes for descriptor files\n      e.g. c(\"cats\",\"maccs\") if [descriptor file].cats and [descriptor file].maccs should be loaded.\n") ;q(save="no")}
+if (!exists("TOXICITY.FILES"))   {cat("TOXICITY.FILES not defined, please give name of toxicity containing files.\n");q(save="no")}
+if (!exists("ENDPOINT"))         {cat("ENDPOINT not defined, this is the column header of the used endpoint data in the TOXICITY FILES\n")}
+if (!exists("TRAIN.TEST.SPLIT.FILES"))   {cat("TRAIN.TEST.SPLIT.FILES not defined, please give name of the train/test/val splitting is given\n");q(save="no")}
+if (!exists("SET.column.header")){cat("SET.column.header is not defined. Should be one of the headers in the SET file\n");q(save="no")}
+if (!exists("NUMERIC.ENDPOINT")) {NUMERIC.ENDPOINT=F}
+if (!exists("extraTTV"))         {extraTTV=NA}
+## GA optimization SETTINGS
+if (!exists("LOAD"))             {LOAD = FALSE} # load old run or start new?
+if (!exists("iter"))             {cat("iter (iterations in one run) is not defined, should be integer like 5, 10\n");q(save="no")}
+if (!exists("pS"))               {cat("pS (population size) is not defined, should be integer like 10,20,30 ...\n");q(save="no")}
+if (!exists("Nruns"))            {Nruns <- 1; cat("Nruns (number of runs) not specified, taking default=1\n");q(save="no")}
+if (!exists("N.desc"))           {N.desc <- NA}
+if (!exists("testweight"))       {testweight = 1}
+if (is.na(testweight))           {testweight = 1}
+if (!exists("MUTATION"))         {MUTATION=NA}
+if (!exists("increaseMUTATION")) {increaseMUTATION=NA}
+if (!exists("penalty"))          {penalty <- NA} else {if (!all(is.numeric(penalty))|!is.vector(penalty)|!NROW(penalty)==2) {
+                                                           penalty <- NA; cat("WARNING -- penalty should be a numeric vector of length 2 e.g. c(40,0.5)\n")}}
+if (!exists("fitness"))          {if (NUMERIC.ENDPOINT) {fitness="Rsquare"} else {fitness=NA}}
+if (!is.na(fitness))             {fitness <- toupper(fitness)
+                                  if (length(grep("^RSQ.*",fitness))) {fitness <- "RSQUARE"}
+                                  if (length(grep("^RMS.*",fitness))) {fitness <- "RMSE"}
+                                  }
+if (!exists("CROSSVAL"))         {CROSSVAL=F}
+if (!exists("Nfold"))            {Nfold=5}
+if (!exists("LOOCV"))            {LOOCV=F} # default: do not do leave-one-out cross validation
+if (!exists("POP.EVAL"))         {POP.EVAL=F}
+if (!exists("use.these.descriptors")) {use.these.descriptors <- NA} else {POP.EVAL=F;LOAD=F}
+## SVM SETTINGS
+if (!exists("NU"))               {NU<-NA} else {if (!is.numeric(NU)) {NU <- NA}}
+if (!exists("GAMMA"))            {GAMMA<-NA} else {if (!is.numeric(GAMMA)) {GAMMA <- NA}}
+if (!exists("svm.type"))         {svm.type="nu-classification"; cat("Using default svm type: nu-classification\n")}
+if (!exists("kernel.type"))      {kernel.type="radial"; cat("Using default svm kernel: radial\n")}
+if (!exists("PROBABILITY"))      {PROBABILITY=F}
+if (!exists("class.weight"))     {class.weight=NA}
+if (!exists("tolerance"))        {tolerance=0.001; cat("using default tolerance = 0.001\n")
+                          } else {if (!is.numeric(tolerance)) {cat(paste("tolerance =",tolerance," is no numeric value! using tolerance = 0.001\n")); tolerance=0.001 }}
+if (!exists("epsilon"))          {epsilon=0.1; cat("using default insensitive loss function epsilon = 0.1\n")
+                          } else {if (!is.numeric(epsilon)) {cat(paste("ERROR: epsilon =",epsilon," is no numeric value! using epsilon = 0.1\n")); epsilon=0.1 }}
+if (length(grep("regression",svm.type))>0) {PROBABILITY=F}
+## OUTPUT SETTINGS
+if (!exists("DEBUG"))            {DEBUG <- FALSE}
+if (!exists("FILENAME"))         {FILENAME="DEFAULT";original.FILENAME <- FILENAME} else {original.FILENAME <- FILENAME; FILENAME <- gsub("[.][^.]*$","",FILENAME)}
+## EVALUATION SETTINGS
+if (!exists("ADDITIONAL.MODELS"))  {ADDITIONAL.MODELS <- FALSE}
+if (!exists("APPLICABILITY"))      {APPLICABILITY=TRUE}
+if (!exists("PROBABILITY"))        {PROBABILITY=FALSE}
+if (!exists("output.PRUNED"))      {output.PRUNED=NA}
+if (!exists("PRUNING"))            {PRUNING=TRUE}
+if (!exists("PRINT.SE.SP.THRESHOLDS")) {PRINT.SE.SP.THRESHOLDS=FALSE}
+if (!exists("MODEL"))              {MODEL=1}
+if (!exists("FILL.WITH.DUMMY.COMPOUNDS")) {FILL.WITH.DUMMY.COMPOUNDS=F}
+
+
+DoVal <- 0 # default is to not use a validation set. If a validation set is present this option will later be automatically changed to 1
+
+
+# You will need all these packages!
+#install.packages("genalg",repos='http://cran.us.r-project.org')
+#install.packages("gridBdase",repos='http://cran.us.r-project.org')
+library(genalg)
+library(ggplot2)
+library(reshape)
+library(pROC)
+library(e1071)
+library(grid)
+library(plyr)
+
+
+##
+#
+#     START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT
+#    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT
+#   START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT    START of MAIN SCRIPT
+
+if (SYSTEM == "Linux")   { script.folder <-  "~/Statistics/SVM/" }
+if (SYSTEM == "Windows") { script.folder <- "Z:/Statistics/SVM/" }
+
+# defining the functions    GAopt_SVM_v2.4_functions.r
+source(paste(script.folder,"GA-SVM_v2.5_functions.r",sep=""))
+
+# loading the data
+source(paste(script.folder,"GA-SVM_v2.5_load_data.r",sep=""))
+
+
+# defining SVM stuff and the fitness function vfor GA
+source(paste(script.folder,"GA-SVM_v2.5_SVM_and_fitness.r",sep=""))
+
+
+if (OPT) {
+# the GA run
+source(paste(script.folder,"GA-SVM_v2.5_GA_run.r",sep=""))
+cat("\n----------------------------\n ...done optimizating\n")
+}
+
+if (EVAL) {
+# evaluating the optimized model
+#  this includes:
+#                 - density plots
+#                 - descriptor pruning
+#                 - model building including test and validation compounds
+#                 - saving the model files
+#                 - saving graphs and so on ...
+#source(paste(script.folder,"GA-SVM_v2.5_evaluate_full.r",sep="")) ### older version with not well written code
+source(paste(script.folder,"GA-SVM_v2.5_evaluate.r",sep=""))
+cat("\n----------------------------\n ...done evaluating\n")
+}
+
+
+
+
+
+setwd(HOME)
+
+FILENAME <- original.FILENAME
+
