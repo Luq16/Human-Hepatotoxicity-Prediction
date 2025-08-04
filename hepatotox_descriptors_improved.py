@@ -21,6 +21,14 @@ from rdkit.Chem.Fragments import fr_NH0, fr_NH1, fr_NH2, fr_Ar_N, fr_Ar_NH, fr_A
 import warnings
 warnings.filterwarnings('ignore')
 
+# Import preprocessing module
+try:
+    from preprocess_molecules import preprocess_for_descriptors
+    PREPROCESSING_AVAILABLE = True
+except ImportError:
+    PREPROCESSING_AVAILABLE = False
+    print("Warning: Preprocessing module not available. Using raw SMILES.")
+
 class ImprovedHepatotoxicityDescriptors:
     """
     Calculate molecular descriptors for hepatotoxicity prediction using proper methods.
@@ -30,31 +38,61 @@ class ImprovedHepatotoxicityDescriptors:
         """Initialize the descriptor calculator."""
         self.pharmacophore_factory = Gobbi_Pharm2D.factory
         
-    def calculate_all_descriptors(self, smiles_list):
+    def calculate_all_descriptors(self, smiles_list, preprocess=True, apply_qsar_filters=False):
         """
         Calculate all descriptors for a list of SMILES strings.
         
         Args:
             smiles_list (list): List of SMILES strings
+            preprocess (bool): Whether to preprocess molecules (standardize, remove salts, etc.)
+            apply_qsar_filters (bool): Whether to apply QSAR molecular filters before calculation
             
         Returns:
             pandas.DataFrame: DataFrame containing all calculated descriptors
         """
+        # Apply QSAR filters if requested
+        working_smiles = smiles_list
+        if apply_qsar_filters:
+            try:
+                from feature_selection import QSARMolecularFilter
+                qsar_filter = QSARMolecularFilter()
+                filter_results = qsar_filter.filter_molecules(smiles_list)
+                
+                print(f"QSAR Filter Results: {filter_results['passed']}/{filter_results['total']} molecules passed")
+                if filter_results['failed'] > 0:
+                    print(f"Filtered out {filter_results['failed']} molecules that failed QSAR filters")
+                
+                working_smiles = filter_results['passed_smiles']
+                
+            except ImportError:
+                print("Warning: Feature selection module not available, skipping QSAR filters")
+        
+        # Preprocess molecules if requested
+        if preprocess and PREPROCESSING_AVAILABLE:
+            print("Preprocessing molecules (removing salts, standardizing charges, etc.)...")
+            processed_smiles = preprocess_for_descriptors(working_smiles)
+            # Keep mapping to original SMILES
+            smiles_mapping = list(zip(working_smiles, processed_smiles))
+        else:
+            if preprocess and not PREPROCESSING_AVAILABLE:
+                print("Warning: Preprocessing requested but module not available")
+            smiles_mapping = [(s, s) for s in working_smiles]
+        
         results = []
         
-        for i, smiles in enumerate(smiles_list):
-            print(f"Processing compound {i+1}/{len(smiles_list)}: {smiles}")
+        for i, (original_smiles, processed_smiles) in enumerate(smiles_mapping):
+            print(f"Processing compound {i+1}/{len(smiles_list)}: {original_smiles}")
             
-            mol = Chem.MolFromSmiles(smiles)
+            mol = Chem.MolFromSmiles(processed_smiles)
             if mol is None:
-                print(f"Warning: Could not parse SMILES: {smiles}")
+                print(f"Warning: Could not parse SMILES: {processed_smiles}")
                 continue
             
             # Add hydrogens for accurate calculations
             mol = Chem.AddHs(mol)
             
             descriptors = {}
-            descriptors['SMILES'] = smiles
+            descriptors['SMILES'] = original_smiles  # Keep original SMILES in output
             
             # Calculate different descriptor categories
             descriptors.update(self._calculate_basic_descriptors(mol))
@@ -69,6 +107,34 @@ class ImprovedHepatotoxicityDescriptors:
             results.append(descriptors)
             
         return pd.DataFrame(results)
+    
+    def filter_descriptors(self, descriptor_df, apply_statistical_filters=False, 
+                          variance_threshold=0.01, correlation_threshold=0.95):
+        """
+        Apply statistical filters to calculated descriptors (optional post-processing).
+        
+        Args:
+            descriptor_df (DataFrame): Descriptor dataframe
+            apply_statistical_filters (bool): Whether to apply variance/correlation filters
+            variance_threshold (float): Minimum variance threshold
+            correlation_threshold (float): Maximum correlation threshold
+            
+        Returns:
+            tuple: (filtered_df, filter_stats)
+        """
+        if not apply_statistical_filters:
+            return descriptor_df, {'filters_applied': False}
+        
+        try:
+            from feature_selection import prefilter_descriptors_for_ga
+            print("Applying statistical descriptor filters...")
+            filtered_df, stats = prefilter_descriptors_for_ga(descriptor_df)
+            stats['filters_applied'] = True
+            return filtered_df, stats
+            
+        except ImportError:
+            print("Warning: Feature selection module not available, skipping statistical filters")
+            return descriptor_df, {'filters_applied': False, 'error': 'module_not_available'}
     
     def _calculate_basic_descriptors(self, mol):
         """Calculate basic molecular descriptors."""
@@ -585,27 +651,58 @@ class ImprovedHepatotoxicityDescriptors:
 
 
 def main():
-    """Example usage of the improved descriptor calculator."""
+    """Example usage of the improved descriptor calculator with optional filtering."""
     
-    # Example SMILES strings
+    # Example SMILES strings including some problematic ones
     example_smiles = [
         'CCO',  # Ethanol
         'CC(=O)NC1=CC=C(C=C1)O',  # Acetaminophen
         'CN1C=NC2=C1C(=O)N(C(=O)N2C)C',  # Caffeine
         'CC(C)CC1=CC=C(C=C1)C(C)C(=O)O',  # Ibuprofen
         'OC(=O)Cc1ccccc1Nc1c(Cl)cccc1Cl',  # Diclofenac
+        'C' * 30,  # Large hydrocarbon (should be filtered by QSAR)
+        '[Na+].[Cl-]',  # Salt (should be filtered by QSAR)
     ]
     
     # Initialize calculator
     calculator = ImprovedHepatotoxicityDescriptors()
     
-    # Calculate descriptors
-    print("Calculating improved hepatotoxicity descriptors...")
-    results = calculator.calculate_all_descriptors(example_smiles)
+    print("=== Example 1: Basic descriptor calculation (no filters) ===")
+    results_basic = calculator.calculate_all_descriptors(example_smiles, 
+                                                        preprocess=True, 
+                                                        apply_qsar_filters=False)
+    print(f"Calculated {len(results_basic.columns)-1} descriptors for {len(results_basic)} molecules")
     
-    # Display results
-    print(f"\nCalculated {len(results.columns)-1} descriptors for {len(results)} molecules")
-    print("\nDescriptor categories:")
+    print("\n=== Example 2: With QSAR molecular filters ===")
+    results_qsar = calculator.calculate_all_descriptors(example_smiles, 
+                                                       preprocess=True, 
+                                                       apply_qsar_filters=True)
+    print(f"After QSAR filters: {len(results_qsar)} molecules retained")
+    
+    print("\n=== Example 3: With statistical descriptor filters ===")
+    # Apply statistical filters to descriptors
+    filtered_results, filter_stats = calculator.filter_descriptors(results_basic, 
+                                                                   apply_statistical_filters=True)
+    
+    if filter_stats.get('filters_applied', False):
+        original_features = len(results_basic.columns) - 1  # Exclude SMILES
+        filtered_features = len(filtered_results.columns) - 1  # Exclude SMILES
+        print(f"Statistical filtering: {filtered_features}/{original_features} descriptors retained")
+        
+        if 'constant_removed' in filter_stats:
+            print(f"- Removed {len(filter_stats['constant_removed'])} constant features")
+        if 'variance_removed' in filter_stats:
+            print(f"- Removed {len(filter_stats['variance_removed'])} low-variance features")
+        if 'correlation_removed' in filter_stats:
+            print(f"- Removed {len(filter_stats['correlation_removed'])} highly correlated features")
+    
+    print("\nUsage options:")
+    print("1. Basic: calculate_all_descriptors(smiles_list)")
+    print("2. With preprocessing: calculate_all_descriptors(smiles_list, preprocess=True)")
+    print("3. With QSAR filters: calculate_all_descriptors(smiles_list, apply_qsar_filters=True)")
+    print("4. With descriptor filters: filter_descriptors(df, apply_statistical_filters=True)")
+    
+    print("\nDescriptor categories calculated:")
     print("- Basic molecular properties: MW, LogP, TPSA, etc.")
     print("- Pharmacophore descriptors: PD, PA, PL, etc.")
     print("- MACCS keys: MKEY14, MKEY15, etc.")
@@ -616,14 +713,10 @@ def main():
     print("- Fragment descriptors: functional groups, ring types")
     
     # Save results
-    results.to_csv('hepatotoxicity_descriptors_improved.csv', index=False)
+    results_basic.to_csv('hepatotoxicity_descriptors_improved.csv', index=False)
     print(f"\nResults saved to 'hepatotoxicity_descriptors_improved.csv'")
     
-    # Show some example values
-    print("\nSample descriptor values for first compound:")
-    print(results.iloc[0, 1:11].to_string())
-    
-    return results
+    return results_basic
 
 
 if __name__ == "__main__":
