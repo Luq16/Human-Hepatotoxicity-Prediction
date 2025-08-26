@@ -405,32 +405,104 @@ class ImprovedHepatotoxicityDescriptors:
         try:
             # Generate 3D coordinates
             mol_3d = Chem.Mol(mol)
-            AllChem.EmbedMolecule(mol_3d, randomSeed=42)
+            embed_result = AllChem.EmbedMolecule(mol_3d, randomSeed=42)
+            
+            if embed_result == -1:
+                # 3D embedding failed, use 2D fallback
+                print("3D embedding failed, using default values for geometric descriptors")
+                geometric_descriptors = ['Asphericity', 'Eccentricity', 'InertialShapeFactor',
+                                       'NPR1', 'NPR2', 'PMI1', 'PMI2', 'PMI3', 
+                                       'RadiusOfGyration', 'SpherocityIndex']
+                for desc in geometric_descriptors:
+                    descriptors[desc] = 0
+                return descriptors
+            
             AllChem.UFFOptimizeMolecule(mol_3d)
             
-            # Asphericity
-            descriptors['Asphericity'] = Descriptors.Asphericity(mol_3d)
+            # Try each descriptor individually with safe checks
+            try:
+                if hasattr(Descriptors, 'Asphericity'):
+                    descriptors['Asphericity'] = Descriptors.Asphericity(mol_3d)
+                else:
+                    descriptors['Asphericity'] = 0
+            except:
+                descriptors['Asphericity'] = 0
             
-            # Eccentricity
-            descriptors['Eccentricity'] = Descriptors.Eccentricity(mol_3d)
+            try:
+                if hasattr(Descriptors, 'Eccentricity'):
+                    descriptors['Eccentricity'] = Descriptors.Eccentricity(mol_3d)
+                else:
+                    descriptors['Eccentricity'] = 0
+            except:
+                descriptors['Eccentricity'] = 0
             
-            # Inertial shape factor
-            descriptors['InertialShapeFactor'] = Descriptors.InertialShapeFactor(mol_3d)
+            try:
+                if hasattr(Descriptors, 'InertialShapeFactor'):
+                    descriptors['InertialShapeFactor'] = Descriptors.InertialShapeFactor(mol_3d)
+                else:
+                    descriptors['InertialShapeFactor'] = 0
+            except:
+                descriptors['InertialShapeFactor'] = 0
             
             # NPR (Normalized Principal Moments Ratio)
-            descriptors['NPR1'] = Descriptors.NPR1(mol_3d)
-            descriptors['NPR2'] = Descriptors.NPR2(mol_3d)
+            try:
+                if hasattr(Descriptors, 'NPR1'):
+                    descriptors['NPR1'] = Descriptors.NPR1(mol_3d)
+                else:
+                    descriptors['NPR1'] = 0
+            except:
+                descriptors['NPR1'] = 0
+                
+            try:
+                if hasattr(Descriptors, 'NPR2'):
+                    descriptors['NPR2'] = Descriptors.NPR2(mol_3d)
+                else:
+                    descriptors['NPR2'] = 0
+            except:
+                descriptors['NPR2'] = 0
             
             # PMI (Principal Moments of Inertia)
-            descriptors['PMI1'] = Descriptors.PMI1(mol_3d)
-            descriptors['PMI2'] = Descriptors.PMI2(mol_3d)
-            descriptors['PMI3'] = Descriptors.PMI3(mol_3d)
+            try:
+                if hasattr(Descriptors, 'PMI1'):
+                    descriptors['PMI1'] = Descriptors.PMI1(mol_3d)
+                else:
+                    descriptors['PMI1'] = 0
+            except:
+                descriptors['PMI1'] = 0
+                
+            try:
+                if hasattr(Descriptors, 'PMI2'):
+                    descriptors['PMI2'] = Descriptors.PMI2(mol_3d)
+                else:
+                    descriptors['PMI2'] = 0
+            except:
+                descriptors['PMI2'] = 0
+                
+            try:
+                if hasattr(Descriptors, 'PMI3'):
+                    descriptors['PMI3'] = Descriptors.PMI3(mol_3d)
+                else:
+                    descriptors['PMI3'] = 0
+            except:
+                descriptors['PMI3'] = 0
             
             # Radius of gyration
-            descriptors['RadiusOfGyration'] = Descriptors.RadiusOfGyration(mol_3d)
+            try:
+                if hasattr(Descriptors, 'RadiusOfGyration'):
+                    descriptors['RadiusOfGyration'] = Descriptors.RadiusOfGyration(mol_3d)
+                else:
+                    descriptors['RadiusOfGyration'] = 0
+            except:
+                descriptors['RadiusOfGyration'] = 0
             
             # Spherocity
-            descriptors['SpherocityIndex'] = Descriptors.SpherocityIndex(mol_3d)
+            try:
+                if hasattr(Descriptors, 'SpherocityIndex'):
+                    descriptors['SpherocityIndex'] = Descriptors.SpherocityIndex(mol_3d)
+                else:
+                    descriptors['SpherocityIndex'] = 0
+            except:
+                descriptors['SpherocityIndex'] = 0
             
         except Exception as e:
             print(f"Error calculating geometric descriptors: {e}")
