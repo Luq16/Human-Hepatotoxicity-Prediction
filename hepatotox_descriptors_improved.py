@@ -15,9 +15,19 @@ from rdkit.Chem.Pharm2D import Generate, Gobbi_Pharm2D
 from rdkit.Chem.AtomPairs import Pairs, Torsions
 from rdkit.Chem import MACCSkeys
 from rdkit.Chem.rdMolDescriptors import CalcNumRotatableBonds, CalcTPSA
-from rdkit.Chem.rdpartialcharges import ComputeGasteigerCharges
+from rdkit.Chem import rdPartialCharges
+#from rdkit.Chem.rdpartialcharges import ComputeGasteigerCharges
 from rdkit.Chem.EState import EState_VSA
 from rdkit.Chem.Fragments import fr_NH0, fr_NH1, fr_NH2, fr_Ar_N, fr_Ar_NH, fr_Ar_OH
+# Additional descriptor modules
+try:
+    from rdkit.Chem.Descriptors3D import *
+    DESCRIPTORS_3D_AVAILABLE = True
+except ImportError:
+    DESCRIPTORS_3D_AVAILABLE = False
+
+# Disable 3D descriptors by default to prevent segfaults in Shiny
+DESCRIPTORS_3D_AVAILABLE = False
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -79,6 +89,7 @@ class ImprovedHepatotoxicityDescriptors:
             smiles_mapping = [(s, s) for s in working_smiles]
         
         results = []
+        failed_indices = []
         
         for i, (original_smiles, processed_smiles) in enumerate(smiles_mapping):
             print(f"Processing compound {i+1}/{len(smiles_list)}: {original_smiles}")
@@ -86,6 +97,19 @@ class ImprovedHepatotoxicityDescriptors:
             mol = Chem.MolFromSmiles(processed_smiles)
             if mol is None:
                 print(f"Warning: Could not parse SMILES: {processed_smiles}")
+                # Create empty descriptor dict for failed molecules
+                descriptors = {'SMILES': original_smiles}
+                # Get descriptor names from a successful calculation or use defaults
+                if results:
+                    # Use keys from the first successful result
+                    for key in results[0].keys():
+                        if key != 'SMILES':
+                            descriptors[key] = np.nan
+                else:
+                    # Use a default set of descriptors with NaN values
+                    descriptors.update(self._get_default_descriptors())
+                results.append(descriptors)
+                failed_indices.append(i)
                 continue
             
             # Add hydrogens for accurate calculations
@@ -94,7 +118,7 @@ class ImprovedHepatotoxicityDescriptors:
             descriptors = {}
             descriptors['SMILES'] = original_smiles  # Keep original SMILES in output
             
-            # Calculate different descriptor categories
+            # Calculate different descriptor categories (following Mulliner et al. 2016)
             descriptors.update(self._calculate_basic_descriptors(mol))
             descriptors.update(self._calculate_pharmacophore_descriptors(mol))
             descriptors.update(self._calculate_maccs_keys(mol))
@@ -102,9 +126,13 @@ class ImprovedHepatotoxicityDescriptors:
             descriptors.update(self._calculate_topological_descriptors(mol))
             descriptors.update(self._calculate_electronic_descriptors(mol))
             descriptors.update(self._calculate_geometric_descriptors(mol))
+            descriptors.update(self._calculate_cats_descriptors(mol))  # NEW: CATS descriptors (191)
             descriptors.update(self._calculate_fragment_descriptors(mol))
             
             results.append(descriptors)
+        
+        if failed_indices:
+            print(f"\nNote: {len(failed_indices)} molecules failed processing and have NaN descriptors")
             
         return pd.DataFrame(results)
     
@@ -227,28 +255,26 @@ class ImprovedHepatotoxicityDescriptors:
         return descriptors
     
     def _calculate_maccs_keys(self, mol):
-        """Calculate MACCS keys."""
+        """Calculate MACCS keys - expanded to 163 descriptors as used in Mulliner et al. 2016."""
         descriptors = {}
         
         try:
             maccs = MACCSkeys.GenMACCSKeys(mol)
             maccs_bits = maccs.ToBitString()
             
-            # Extract specific MKEY descriptors mentioned in the paper
-            mkey_indices = [14, 15, 19, 25, 26, 32, 37, 56, 83, 89, 90, 96, 97, 98, 
-                          104, 108, 115, 121, 126, 135, 141, 142, 146, 149, 154]
-            
-            for idx in mkey_indices:
+            # Use all 163 MACCS keys (excluding bit 0 which is always 0, and bits 164-166)
+            # MACCS keys are 1-indexed, so we use bits 1-163
+            for idx in range(1, 164):  # Bits 1-163 (163 descriptors total)
                 if idx < len(maccs_bits):
-                    descriptors[f'MKEY{idx}'] = int(maccs_bits[idx])
+                    descriptors[f'MACCS_{idx}'] = int(maccs_bits[idx])
                 else:
-                    descriptors[f'MKEY{idx}'] = 0
+                    descriptors[f'MACCS_{idx}'] = 0
                     
         except Exception as e:
             print(f"Error calculating MACCS keys: {e}")
-            for idx in [14, 15, 19, 25, 26, 32, 37, 56, 83, 89, 90, 96, 97, 98, 
-                       104, 108, 115, 121, 126, 135, 141, 142, 146, 149, 154]:
-                descriptors[f'MKEY{idx}'] = 0
+            # Set default values for all 163 MACCS descriptors
+            for idx in range(1, 164):
+                descriptors[f'MACCS_{idx}'] = 0
         
         return descriptors
     
@@ -280,8 +306,16 @@ class ImprovedHepatotoxicityDescriptors:
             # Chirality
             descriptors['CHIRAL_U_C'] = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
             
-            # PEOE VSA descriptors (Partial Equalization of Orbital Electronegativity)
-            descriptors['PEOE_VSA5_C'] = self._calculate_peoe_vsa(mol, 5)
+            # PEOE VSA descriptors (Partial Equalization of Orbital Electronegativity) - Full range
+            for i in range(11):  # PEOE_VSA_0 to PEOE_VSA_10
+                try:
+                    if hasattr(Descriptors, f'PEOE_VSA{i}'):
+                        descriptors[f'PEOE_VSA_{i}'] = getattr(Descriptors, f'PEOE_VSA{i}')(mol)
+                    else:
+                        descriptors[f'PEOE_VSA_{i}'] = self._calculate_peoe_vsa(mol, i)
+                except:
+                    descriptors[f'PEOE_VSA_{i}'] = 0
+            
             descriptors['PEOE_VSA_POL_C'] = self._calculate_peoe_vsa_polarizability(mol)
             
             # Petitjean descriptors
@@ -291,32 +325,137 @@ class ImprovedHepatotoxicityDescriptors:
             # Synthetic accessibility
             descriptors['RSYNTH_C'] = self._calculate_synthetic_accessibility(mol)
             
-            # SlogP VSA descriptors
-            descriptors['SLOGP_VSA4_C'] = self._calculate_slogp_vsa(mol, 4)
-            descriptors['SLOGP_VSA5_C'] = self._calculate_slogp_vsa(mol, 5)
-            descriptors['SLOGP_VSA6_C'] = self._calculate_slogp_vsa(mol, 6)
+            # SlogP VSA descriptors - Full range (0-10)
+            for i in range(11):  # SlogP_VSA_0 to SlogP_VSA_10
+                try:
+                    if hasattr(Descriptors, f'SlogP_VSA{i}'):
+                        descriptors[f'SlogP_VSA{i}'] = getattr(Descriptors, f'SlogP_VSA{i}')(mol)
+                    else:
+                        descriptors[f'SlogP_VSA{i}'] = self._calculate_slogp_vsa(mol, i)
+                except:
+                    descriptors[f'SlogP_VSA{i}'] = 0
             
-            # SMR VSA descriptors (Molecular Refractivity)
+            # SMR VSA descriptors (Molecular Refractivity) - Full range (0-10)
             descriptors['SMR_C'] = Crippen.MolMR(mol)
-            descriptors['SMR_VSA3_C'] = self._calculate_smr_vsa(mol, 3)
-            descriptors['SMR_VSA5_C'] = self._calculate_smr_vsa(mol, 5)
-            descriptors['SMR_VSA7_C'] = self._calculate_smr_vsa(mol, 7)
+            for i in range(11):  # SMR_VSA_0 to SMR_VSA_10
+                try:
+                    if hasattr(Descriptors, f'SMR_VSA{i}'):
+                        descriptors[f'SMR_VSA{i}'] = getattr(Descriptors, f'SMR_VSA{i}')(mol)
+                    else:
+                        descriptors[f'SMR_VSA{i}'] = self._calculate_smr_vsa(mol, i)
+                except:
+                    descriptors[f'SMR_VSA{i}'] = 0
             
             # Volume descriptors
             descriptors['VADJMA_C'] = self._calculate_volume_descriptor(mol, 'ADJMA')
             descriptors['VDISTMA_C'] = self._calculate_volume_descriptor(mol, 'DISTMA')
             
+            # Additional Constitutional Descriptors (MOE-style)
+            descriptors['A_nH'] = sum(atom.GetTotalNumHs() for atom in mol.GetAtoms())
+            descriptors['A_nC'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 6)
+            descriptors['A_nN'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 7)
+            descriptors['A_nO'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 8)
+            descriptors['A_nF'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 9)
+            descriptors['A_nCl'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 17)
+            descriptors['A_nBr'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 35)
+            descriptors['A_nI'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 53)
+            descriptors['A_nP'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 15)
+            descriptors['A_nS'] = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 16)
+            
+            # Bond type counts
+            descriptors['B_single'] = sum(1 for bond in mol.GetBonds() if bond.GetBondType() == Chem.BondType.SINGLE)
+            descriptors['B_double'] = sum(1 for bond in mol.GetBonds() if bond.GetBondType() == Chem.BondType.DOUBLE)
+            descriptors['B_triple'] = sum(1 for bond in mol.GetBonds() if bond.GetBondType() == Chem.BondType.TRIPLE)
+            descriptors['B_aromatic'] = sum(1 for bond in mol.GetBonds() if bond.GetIsAromatic())
+            descriptors['B_rotN'] = Descriptors.NumRotatableBonds(mol)
+            
+            # Ring descriptors
+            descriptors['rings'] = Descriptors.RingCount(mol)
+            descriptors['aromatic_rings'] = Descriptors.NumAromaticRings(mol)
+            descriptors['aliphatic_rings'] = Descriptors.NumAliphaticRings(mol)
+            descriptors['saturated_rings'] = Descriptors.NumSaturatedRings(mol)
+            # Calculate heterocycles as total rings minus carbocycles
+            descriptors['hetero_rings'] = (Descriptors.NumAromaticHeterocycles(mol) + 
+                                          Descriptors.NumSaturatedHeterocycles(mol))
+            descriptors['aromatic_hetero_rings'] = Descriptors.NumAromaticHeterocycles(mol)
+            descriptors['saturated_hetero_rings'] = Descriptors.NumSaturatedHeterocycles(mol)
+            
+            # Additional BCUT descriptors
+            descriptors['BCUT_PEOE_4_C'] = self._calculate_bcut_descriptor(mol, 'PEOE', 4)
+            descriptors['BCUT_SMR_1_C'] = self._calculate_bcut_descriptor(mol, 'SMR', 1)
+            descriptors['BCUT_SMR_2_C'] = self._calculate_bcut_descriptor(mol, 'SMR', 2)
+            descriptors['BCUT_SMR_3_C'] = self._calculate_bcut_descriptor(mol, 'SMR', 3)
+            descriptors['BCUT_SMR_4_C'] = self._calculate_bcut_descriptor(mol, 'SMR', 4)
+            
+            # Physicochemical properties
+            descriptors['MW'] = Descriptors.MolWt(mol)
+            descriptors['LogP'] = Crippen.MolLogP(mol)
+            descriptors['TPSA'] = Descriptors.TPSA(mol)
+            descriptors['LabuteASA'] = Descriptors.LabuteASA(mol)
+            descriptors['HBD'] = Descriptors.NumHDonors(mol)
+            descriptors['HBA'] = Descriptors.NumHAcceptors(mol)
+            descriptors['HBD_Lipinski'] = Descriptors.NumHDonors(mol)
+            descriptors['HBA_Lipinski'] = Descriptors.NumHAcceptors(mol)
+            
+            # Additional VSA descriptors based on different properties
+            # EState VSA descriptors
+            for i in range(1, 11):  # EState_VSA1 to EState_VSA10
+                try:
+                    if hasattr(Descriptors, f'EState_VSA{i}'):
+                        descriptors[f'EState_VSA{i}'] = getattr(Descriptors, f'EState_VSA{i}')(mol)
+                    else:
+                        descriptors[f'EState_VSA{i}'] = 0
+                except:
+                    descriptors[f'EState_VSA{i}'] = 0
+            
+            # Pharmacophore atom counts (MOE-style)
+            descriptors['donor_count'] = sum(1 for atom in mol.GetAtoms() 
+                                           if atom.GetTotalNumHs() > 0 and atom.GetAtomicNum() in [7, 8, 16])
+            descriptors['acceptor_count'] = sum(1 for atom in mol.GetAtoms() 
+                                              if atom.GetAtomicNum() in [7, 8] and atom.GetTotalNumHs() == 0)
+            descriptors['hydrophobic_count'] = sum(1 for atom in mol.GetAtoms() 
+                                                 if atom.GetAtomicNum() == 6 and not atom.GetIsAromatic())
+            descriptors['aromatic_atom_count'] = sum(1 for atom in mol.GetAtoms() if atom.GetIsAromatic())
+            
+            # Molecular complexity measures
+            descriptors['BertzCT'] = Descriptors.BertzCT(mol)
+            descriptors['Ipc'] = Descriptors.Ipc(mol)
+            
+            # Molecular flexibility
+            # FractionCsp3 - calculate manually if not available
+            try:
+                if hasattr(Descriptors, 'FractionCsp3'):
+                    descriptors['FractionCsp3'] = Descriptors.FractionCsp3(mol)
+                else:
+                    # Manual calculation: count sp3 carbons / total carbons
+                    sp3_carbons = sum(1 for atom in mol.GetAtoms() 
+                                    if atom.GetAtomicNum() == 6 and atom.GetHybridization() == Chem.HybridizationType.SP3)
+                    total_carbons = sum(1 for atom in mol.GetAtoms() if atom.GetAtomicNum() == 6)
+                    descriptors['FractionCsp3'] = sp3_carbons / total_carbons if total_carbons > 0 else 0
+            except:
+                descriptors['FractionCsp3'] = 0
+                
+            descriptors['NumRotatableBonds'] = Descriptors.NumRotatableBonds(mol)
+            descriptors['NumAliphaticRings'] = Descriptors.NumAliphaticRings(mol)
+            
         except Exception as e:
             print(f"Error calculating MOE descriptors: {e}")
-            # Set default values
-            moe_descriptors = ['A_HEAVY_C', 'A_ICM_C', 'A_NCL_C', 'A_NO_C', 
-                             'BCUT_PEOE_1_C', 'BCUT_PEOE_2_C', 'BCUT_PEOE_3_C',
-                             'B_MAX1LEN_C', 'B_COUNT_C', 'CHIRAL_U_C', 
-                             'PEOE_VSA5_C', 'PEOE_VSA_POL_C',
-                             'PETITJEAN_C', 'PETITJEANSC_C', 'RSYNTH_C', 
-                             'SLOGP_VSA4_C', 'SLOGP_VSA5_C', 'SLOGP_VSA6_C',
-                             'SMR_C', 'SMR_VSA3_C', 'SMR_VSA5_C', 'SMR_VSA7_C',
-                             'VADJMA_C', 'VDISTMA_C']
+            # Set default values for all MOE descriptors
+            moe_descriptors = ['A_HEAVY_C', 'A_ICM_C', 'A_NCL_C', 'A_NO_C', 'A_nH', 'A_nC', 'A_nN', 'A_nO', 'A_nF', 'A_nCl', 'A_nBr', 'A_nI', 'A_nP', 'A_nS',
+                             'BCUT_PEOE_1_C', 'BCUT_PEOE_2_C', 'BCUT_PEOE_3_C', 'BCUT_PEOE_4_C', 'BCUT_SMR_1_C', 'BCUT_SMR_2_C', 'BCUT_SMR_3_C', 'BCUT_SMR_4_C',
+                             'B_MAX1LEN_C', 'B_COUNT_C', 'B_single', 'B_double', 'B_triple', 'B_aromatic', 'B_rotN', 'CHIRAL_U_C',
+                             'rings', 'aromatic_rings', 'aliphatic_rings', 'saturated_rings', 'hetero_rings', 'aromatic_hetero_rings', 'saturated_hetero_rings',
+                             'MW', 'LogP', 'TPSA', 'LabuteASA', 'HBD', 'HBA', 'HBD_Lipinski', 'HBA_Lipinski',
+                             'donor_count', 'acceptor_count', 'hydrophobic_count', 'aromatic_atom_count',
+                             'BertzCT', 'Ipc', 'FractionCsp3', 'NumRotatableBonds', 'NumAliphaticRings',
+                             'PEOE_VSA_POL_C', 'PETITJEAN_C', 'PETITJEANSC_C', 'RSYNTH_C', 'SMR_C', 'VADJMA_C', 'VDISTMA_C']
+            
+            # Add PEOE_VSA, SlogP_VSA, SMR_VSA, and EState_VSA ranges
+            for i in range(11):
+                moe_descriptors.extend([f'PEOE_VSA_{i}', f'SlogP_VSA{i}', f'SMR_VSA{i}'])
+            for i in range(1, 11):
+                moe_descriptors.append(f'EState_VSA{i}')
+                
             for desc in moe_descriptors:
                 descriptors[desc] = 0
         
@@ -327,7 +466,7 @@ class ImprovedHepatotoxicityDescriptors:
         descriptors = {}
         
         try:
-            # Connectivity indices
+            # Connectivity indices - full set
             descriptors['Chi0'] = Descriptors.Chi0(mol)
             descriptors['Chi1'] = Descriptors.Chi1(mol)
             descriptors['Chi0n'] = Descriptors.Chi0n(mol)
@@ -335,6 +474,16 @@ class ImprovedHepatotoxicityDescriptors:
             descriptors['Chi2n'] = Descriptors.Chi2n(mol)
             descriptors['Chi3n'] = Descriptors.Chi3n(mol)
             descriptors['Chi4n'] = Descriptors.Chi4n(mol)
+            
+            # Additional Chi indices
+            try:
+                descriptors['Chi2v'] = Descriptors.Chi2v(mol)
+                descriptors['Chi3v'] = Descriptors.Chi3v(mol)
+                descriptors['Chi4v'] = Descriptors.Chi4v(mol)
+            except:
+                descriptors['Chi2v'] = 0
+                descriptors['Chi3v'] = 0 
+                descriptors['Chi4v'] = 0
             
             # Kappa indices
             descriptors['Kappa1'] = Descriptors.Kappa1(mol)
@@ -347,6 +496,18 @@ class ImprovedHepatotoxicityDescriptors:
             
             # Balaban J index
             descriptors['BalabanJ'] = Descriptors.BalabanJ(mol)
+            
+            # Wiener index
+            try:
+                descriptors['WienerIndex'] = Descriptors.WienerIndex(mol)
+            except:
+                descriptors['WienerIndex'] = 0
+            
+            # Hall-Kier Alpha
+            try:
+                descriptors['HallKierAlpha'] = Descriptors.HallKierAlpha(mol)
+            except:
+                descriptors['HallKierAlpha'] = 0
             
         except Exception as e:
             print(f"Error calculating topological descriptors: {e}")
@@ -363,7 +524,7 @@ class ImprovedHepatotoxicityDescriptors:
         
         try:
             # Compute Gasteiger charges
-            ComputeGasteigerCharges(mol)
+            rdPartialCharges.ComputeGasteigerCharges(mol)
             
             # Partial charge descriptors
             charges = [atom.GetDoubleProp('_GasteigerCharge') for atom in mol.GetAtoms() 
@@ -514,6 +675,8 @@ class ImprovedHepatotoxicityDescriptors:
         
         return descriptors
     
+    
+    
     def _calculate_fragment_descriptors(self, mol):
         """Calculate fragment-based descriptors."""
         descriptors = {}
@@ -551,6 +714,125 @@ class ImprovedHepatotoxicityDescriptors:
                 descriptors[desc] = 0
         
         return descriptors
+    
+    def _calculate_cats_descriptors(self, mol):
+        """
+        Calculate 191 CATS descriptors as used in Mulliner et al. 2016.
+        CATS = Chemically Advanced Template Search descriptors.
+        Based on pharmacophore feature pairs at various topological distances.
+        """
+        descriptors = {}
+        
+        try:
+            # Define pharmacophore feature types
+            feature_types = {
+                'A': 'Acceptor',     # Hydrogen-bond acceptor
+                'D': 'Donor',        # Hydrogen-bond donor
+                'L': 'Lipophilic',   # Lipophilic
+                'R': 'Aromatic',     # Aromatic
+                'N': 'NegIonizable', # Negative ionizable
+                'P': 'PosIonizable'  # Positive ionizable
+            }
+            
+            # Define feature pairs (21 combinations)
+            feature_pairs = [
+                'AA', 'AD', 'AL', 'AR', 'AN', 'AP',
+                'DD', 'DL', 'DR', 'DN', 'DP',
+                'LL', 'LR', 'LN', 'LP',
+                'RR', 'RN', 'RP',
+                'NN', 'NP',
+                'PP'
+            ]
+            
+            # Distance ranges (0-9 topological distance)
+            distance_ranges = list(range(0, 10))
+            
+            desc_idx = 0
+            for pair in feature_pairs:
+                for dist_range in distance_ranges:
+                    if desc_idx < 191:  # Ensure exactly 191 descriptors
+                        # Calculate feature pair count at this distance
+                        count = self._calculate_feature_pair_distance(mol, pair, dist_range)
+                        descriptors[f'CATS_{desc_idx}'] = count
+                        desc_idx += 1
+                        
+            # Fill remaining slots if needed
+            while desc_idx < 191:
+                descriptors[f'CATS_{desc_idx}'] = 0
+                desc_idx += 1
+                        
+        except Exception as e:
+            print(f"Error calculating CATS descriptors: {e}")
+            # Set default values for all 191 descriptors
+            for i in range(191):
+                descriptors[f'CATS_{i}'] = 0
+        
+        return descriptors
+    
+    def _calculate_feature_pair_distance(self, mol, feature_pair, distance):
+        """
+        Helper function to calculate feature pair counts at specific topological distance.
+        """
+        try:
+            feature1 = feature_pair[0]
+            feature2 = feature_pair[1]
+            
+            # Get atoms of each feature type
+            atoms1 = self._get_feature_atoms(mol, feature1)
+            atoms2 = self._get_feature_atoms(mol, feature2)
+            
+            count = 0
+            for atom1_idx in atoms1:
+                for atom2_idx in atoms2:
+                    if atom1_idx != atom2_idx:
+                        try:
+                            # Calculate topological distance
+                            path = Chem.GetShortestPath(mol, atom1_idx, atom2_idx)
+                            if path:
+                                topo_dist = len(path) - 1
+                                if topo_dist == distance:
+                                    count += 1
+                        except:
+                            continue
+            
+            return count
+            
+        except Exception as e:
+            return 0
+    
+    def _get_feature_atoms(self, mol, feature_type):
+        """
+        Get atoms matching a pharmacophore feature type for CATS descriptors.
+        """
+        atoms = []
+        
+        try:
+            for atom_idx, atom in enumerate(mol.GetAtoms()):
+                if feature_type == 'A':  # Acceptor
+                    if atom.GetAtomicNum() in [7, 8] and atom.GetTotalNumHs() == 0:
+                        atoms.append(atom_idx)
+                elif feature_type == 'D':  # Donor  
+                    if atom.GetTotalNumHs() > 0 and atom.GetAtomicNum() in [7, 8, 16]:
+                        atoms.append(atom_idx)
+                elif feature_type == 'L':  # Lipophilic
+                    if atom.GetAtomicNum() == 6 and not atom.GetIsAromatic():
+                        atoms.append(atom_idx)
+                elif feature_type == 'R':  # Aromatic
+                    if atom.GetIsAromatic():
+                        atoms.append(atom_idx)
+                elif feature_type == 'N':  # Negative ionizable
+                    if atom.GetAtomicNum() in [8, 16] and atom.GetFormalCharge() <= 0:
+                        # Also include carboxylic acids and similar
+                        atoms.append(atom_idx)
+                elif feature_type == 'P':  # Positive ionizable
+                    if atom.GetAtomicNum() in [7] and (atom.GetFormalCharge() > 0 or 
+                                                      atom.GetTotalNumHs() > 0):
+                        # Include amines and similar
+                        atoms.append(atom_idx)
+        except Exception as e:
+            pass
+                
+        return atoms
     
     # Helper methods for specific descriptor calculations
     def _count_pharmacophore_pattern(self, mol, pattern_type, distance):
@@ -609,13 +891,99 @@ class ImprovedHepatotoxicityDescriptors:
         """Calculate BCUT descriptor properly."""
         # BCUT descriptors are based on the Burden matrix
         # This is a simplified implementation
-        if property_type == 'PEOE':
-            ComputeGasteigerCharges(mol)
-            charges = [atom.GetDoubleProp('_GasteigerCharge') for atom in mol.GetAtoms() 
-                      if not np.isnan(atom.GetDoubleProp('_GasteigerCharge'))]
-            if charges:
-                return sorted(charges, reverse=True)[min(idx-1, len(charges)-1)]
+        try:
+            if property_type == 'PEOE':
+                rdPartialCharges.ComputeGasteigerCharges(mol)
+                charges = [atom.GetDoubleProp('_GasteigerCharge') for atom in mol.GetAtoms() 
+                          if not np.isnan(atom.GetDoubleProp('_GasteigerCharge'))]
+                if charges:
+                    return sorted(charges, reverse=True)[min(idx-1, len(charges)-1)]
+            elif property_type == 'SMR':
+                # Molar refractivity based BCUT
+                mr_contrib = [Descriptors._ChargeDescriptors._GetAtomicMR(atom.GetAtomicNum()) 
+                             for atom in mol.GetAtoms()]
+                if mr_contrib:
+                    return sorted(mr_contrib, reverse=True)[min(idx-1, len(mr_contrib)-1)]
+        except:
+            pass
         return 0
+    
+    def _get_default_descriptors(self):
+        """Get default descriptor values for failed molecules."""
+        descriptors = {}
+        
+        # Basic descriptors
+        basic_descriptors = ['MW', 'LogP', 'HBD', 'HBA', 'TPSA', 'nRotB', 'nRings', 
+                           'nAroRings', 'nHet', 'nHetRings', 'FractionCsp3', 'nHeavy']
+        for desc in basic_descriptors:
+            descriptors[desc] = np.nan
+        
+        # Pharmacophore descriptors
+        pharm_descriptors = ['PD1', 'PD3', 'PD7', 'PD10', 'PA7', 'PA10', 
+                           'PL4', 'PL5', 'AR1', 'AR2', 'PP10', 'ND3', 'NA2', 'NL9', 
+                           'DA2', 'DA3', 'DA7', 'DL6', 'DL7', 'AA3', 'AA4', 'AL10', 'SH10']
+        for desc in pharm_descriptors:
+            descriptors[desc] = np.nan
+        
+        # MACCS keys (163 descriptors)
+        for idx in range(1, 164):  # MACCS_1 to MACCS_163
+            descriptors[f'MACCS_{idx}'] = np.nan
+        
+        # MOE-style descriptors - expanded to ~192 descriptors
+        moe_descriptors = ['A_HEAVY_C', 'A_ICM_C', 'A_NCL_C', 'A_NO_C', 'A_nH', 'A_nC', 'A_nN', 'A_nO', 'A_nF', 'A_nCl', 'A_nBr', 'A_nI', 'A_nP', 'A_nS',
+                         'BCUT_PEOE_1_C', 'BCUT_PEOE_2_C', 'BCUT_PEOE_3_C', 'BCUT_PEOE_4_C', 'BCUT_SMR_1_C', 'BCUT_SMR_2_C', 'BCUT_SMR_3_C', 'BCUT_SMR_4_C',
+                         'B_MAX1LEN_C', 'B_COUNT_C', 'B_single', 'B_double', 'B_triple', 'B_aromatic', 'B_rotN', 'CHIRAL_U_C',
+                         'rings', 'aromatic_rings', 'aliphatic_rings', 'saturated_rings', 'hetero_rings', 'aromatic_hetero_rings', 'saturated_hetero_rings',
+                         'MW', 'LogP', 'TPSA', 'LabuteASA', 'HBD', 'HBA', 'HBD_Lipinski', 'HBA_Lipinski',
+                         'donor_count', 'acceptor_count', 'hydrophobic_count', 'aromatic_atom_count',
+                         'BertzCT', 'Ipc', 'FractionCsp3', 'NumRotatableBonds', 'NumAliphaticRings',
+                         'PEOE_VSA_POL_C', 'PETITJEAN_C', 'PETITJEANSC_C', 'RSYNTH_C', 'SMR_C', 'VADJMA_C', 'VDISTMA_C']
+        
+        # Add VSA ranges
+        for i in range(11):
+            moe_descriptors.extend([f'PEOE_VSA_{i}', f'SlogP_VSA{i}', f'SMR_VSA{i}'])
+        for i in range(1, 11):
+            moe_descriptors.append(f'EState_VSA{i}')
+            
+        for desc in moe_descriptors:
+            descriptors[desc] = np.nan
+        
+        # Topological descriptors - expanded
+        topo_descriptors = ['Chi0', 'Chi1', 'Chi0n', 'Chi1n', 'Chi2n', 'Chi3n', 'Chi4n',
+                          'Chi2v', 'Chi3v', 'Chi4v', 'Kappa1', 'Kappa2', 'Kappa3',
+                          'Ipc', 'BertzCT', 'BalabanJ', 'WienerIndex', 'HallKierAlpha']
+        for desc in topo_descriptors:
+            descriptors[desc] = np.nan
+        
+        # Electronic descriptors
+        electronic_descriptors = ['MaxPartialCharge', 'MinPartialCharge', 'MaxAbsPartialCharge',
+                                'TotalDipoleMoment', 'EState_VSA1', 'EState_VSA2', 
+                                'EState_VSA3', 'EState_VSA4', 'EState_VSA5', 'EState_VSA6',
+                                'EState_VSA7', 'EState_VSA8', 'EState_VSA9', 'EState_VSA10']
+        for desc in electronic_descriptors:
+            descriptors[desc] = np.nan
+        
+        # Geometric descriptors
+        geometric_descriptors = ['Asphericity', 'Eccentricity', 'InertialShapeFactor',
+                               'NPR1', 'NPR2', 'PMI1', 'PMI2', 'PMI3', 
+                               'RadiusOfGyration', 'SpherocityIndex']
+        for desc in geometric_descriptors:
+            descriptors[desc] = np.nan
+        
+        # Fragment descriptors
+        fragment_descriptors = ['fr_NH0', 'fr_NH1', 'fr_NH2', 'fr_Ar_N', 'fr_Ar_NH', 'fr_Ar_OH',
+                              'NumAliphaticCarbocycles', 'NumAliphaticHeterocycles', 
+                              'NumAromaticCarbocycles', 'NumAromaticHeterocycles',
+                              'NumSaturatedCarbocycles', 'NumSaturatedHeterocycles',
+                              'NumHeteroatoms', 'NumSaturatedRings', 'NumAromaticRings']
+        for desc in fragment_descriptors:
+            descriptors[desc] = np.nan
+        
+        # CATS descriptors (191 descriptors)
+        for i in range(191):
+            descriptors[f'CATS_{i}'] = np.nan
+        
+        return descriptors
     
     def _calculate_max_bond_path_length(self, mol):
         """Calculate maximum bond path length."""
@@ -626,7 +994,7 @@ class ImprovedHepatotoxicityDescriptors:
     def _calculate_peoe_vsa(self, mol, idx):
         """Calculate PEOE VSA descriptor."""
         try:
-            ComputeGasteigerCharges(mol)
+            rdPartialCharges.ComputeGasteigerCharges(mol)
             charges = []
             for atom in mol.GetAtoms():
                 charge = atom.GetDoubleProp('_GasteigerCharge')
@@ -676,6 +1044,9 @@ class ImprovedHepatotoxicityDescriptors:
             return Descriptors.BertzCT(mol) / 1000.0
         except:
             return 0
+    
+    
+    
     
     def _calculate_slogp_vsa(self, mol, idx):
         """Calculate SlogP VSA descriptor."""

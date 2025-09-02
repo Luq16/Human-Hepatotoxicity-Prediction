@@ -19,7 +19,7 @@ library(plotly)
 use_python("/usr/bin/python3", required = FALSE)
 
 # Source the Python descriptor calculator
-source_python("hepatotox_descriptors.py")
+source_python("hepatotox_descriptors_improved.py")
 
 # Define UI
 ui <- fluidPage(
@@ -286,7 +286,7 @@ server <- function(input, output, session) {
   
   # Try to initialize the Python calculator
   tryCatch({
-    calculator <<- HepatotoxicityDescriptors()
+    calculator <<- ImprovedHepatotoxicityDescriptors()
     showNotification("Descriptor calculator initialized successfully", type = "success", duration = 3)
   }, error = function(e) {
     showNotification(paste("Error initializing descriptor calculator:", e$message), type = "error")
@@ -474,7 +474,7 @@ server <- function(input, output, session) {
       
       # Determine class based on prediction
       box_class <- ifelse(row$Prediction == "Hepatotoxic", "toxic", "non-toxic")
-      icon <- ifelse(row$Prediction == "Hepatotoxic", "⚠️", "✓")
+      icon <- ifelse(row$Prediction == "Hepatotoxic", "WARNING", "OK")
       
       # Color code confidence
       conf_color <- switch(row$Confidence,
