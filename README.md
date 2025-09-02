@@ -78,10 +78,23 @@ R -e "install.packages(c('genalg', 'e1071', 'ggplot2', 'reshape', 'pROC', 'plyr'
 
 ### Step 1: Prepare Your Data
 
-Create a file with SMILES strings for compounds you want to analyze:
+#### Option A: Using CSV Format (Recommended for Training)
+Create a CSV file in the `datasets/` folder with your compound data:
 
 ```bash
-# Example: create test_compounds.txt
+# Create your CSV file in datasets folder
+mkdir -p datasets
+cat > datasets/my_compounds.csv << EOF
+ID,SMILES,Hepatotoxic
+ETHANOL,CCO,0
+ACETAMINOPHEN,CC(=O)NC1=CC=C(C=C1)O,1
+CAFFEINE,CN1C=NC2=C1C(=O)N(C(=O)N2C)C,0
+EOF
+```
+
+#### Option B: Using Text File (For Descriptor Calculation Only)
+```bash
+# Example: create test_compounds.txt for descriptor calculation
 echo "CCO" > test_compounds.txt
 echo "CC(=O)NC1=CC=C(C=C1)O" >> test_compounds.txt
 echo "CN1C=NC2=C1C(=O)N(C(=O)N2C)C" >> test_compounds.txt
@@ -112,19 +125,47 @@ descriptors = calculator.calculate_all_descriptors(
 descriptors.to_csv('my_descriptors.csv', index=False)
 ```
 
-### Step 3: Train GA-SVM Model (if needed)
+### Step 3: Train GA-SVM Model
 
-```bash
-# Run the complete training pipeline
-Rscript train_M1_improved_with_filters.R
-
-# This will:
-# 1. Generate a balanced dataset (20 toxic, 20 non-toxic compounds)
-# 2. Calculate all 531 descriptors
-# 3. Run GA feature selection (10 independent runs)
-# 4. Train SVM models with optimal features
-# 5. Output results and performance metrics
+**Prepare your CSV file** in the `datasets/` folder with the following format:
+```csv
+ID,SMILES,Hepatotoxic
+ACETAMINOPHEN,CC(=O)NC1=CC=C(C=C1)O,1
+CAFFEINE,CN1C=NC2=C1C(=O)N(C(=O)N2C)C,0
+...
 ```
+
+Where:
+- `ID`: Unique compound identifier
+- `SMILES`: SMILES string of the compound  
+- `Hepatotoxic`: 1 for hepatotoxic, 0 for non-hepatotoxic
+
+**Run training from CSV:**
+```bash
+# Step 1: Prepare data and generate GA-SVM configuration
+Rscript train_M1_from_csv.R compounds_data_example.csv
+
+# Step 2: Run the actual GA-SVM training
+Rscript run_M1_hepatotoxicity.R
+
+# Or with custom files:
+Rscript train_M1_from_csv.R my_compounds.csv my_model
+Rscript run_my_model.R
+```
+
+**Training Process:**
+1. Calculate all 531 molecular descriptors
+2. Apply QSAR molecular filters (removes problematic compounds)
+3. Run GA feature selection (10 independent runs, 20 iterations each)
+4. Train SVM models with optimal features (nu=0.7, RBF kernel)
+5. Output results and performance metrics
+
+**Important Notes:**
+- All CSV files must be placed in the `datasets/` folder
+- Example file provided: `datasets/compounds_data_example.csv` (10 compounds)
+- Script automatically creates the `datasets/` directory if needed
+- Minimum dataset size: 6 compounds (3 toxic, 3 non-toxic)
+- Recommended dataset size: 50+ compounds for robust training
 
 ### Step 4: Make Predictions (using Shiny App)
 
@@ -138,17 +179,32 @@ R -e "shiny::runApp('hepatotox_app.R')"
 
 ### Step 5: Analyze Results
 
-After training completes, you'll find:
+After training completes, you'll find output files organized by your model name:
 
 ```bash
-# GA-SVM results for each run (1-10):
-M1_hepatotoxicity_filtered_model_runs_*.png          # Convergence plots
-M1_hepatotoxicity_filtered_model_runs_*_mean_best.txt # Fitness scores
-M1_hepatotoxicity_filtered_model_runs_*_population.txt # Selected features
+# Input data files:
+datasets/my_compounds.csv                    # Your input data
+datasets/my_model_descriptors.desc          # Calculated descriptors
+datasets/my_model_toxicity.txt              # Toxicity labels
+datasets/my_model_split.txt                 # Train/test/val split
 
-# Descriptor calculation output:
-hepatotoxicity_descriptors_improved.csv              # All calculated descriptors
+# GA-SVM training results (10 independent runs):
+my_model_model_runs_1.png                   # Convergence plot for run 1
+my_model_model_runs_1_mean_best.txt         # Fitness scores per generation
+my_model_model_runs_1_population.txt        # Selected descriptors for run 1
+my_model_model_runs_2.png                   # Convergence plot for run 2
+...                                          # (continues for all 10 runs)
+my_model_model_runs_10_population.txt       # Selected descriptors for run 10
+
+# Configuration and execution:
+run_my_model.R                              # Generated training script
 ```
+
+**Key Output Files:**
+- **Convergence plots** (`.png`): Show how GA fitness improves over generations
+- **Mean/best scores** (`_mean_best.txt`): Fitness evolution for each run
+- **Population files** (`_population.txt`): Final selected descriptors and their importance
+- **Configuration script** (`run_*.R`): The generated GA-SVM configuration for reproducibility
 
 ## Usage
 
@@ -174,15 +230,15 @@ descriptors = calculator.calculate_all_descriptors(
 ### 2. Train Hepatotoxicity Model
 
 ```bash
-# Run the training script
-Rscript train_M1_improved_with_filters.R
+# Run the training script with your CSV data
+Rscript train_M1_from_csv.R my_compounds.csv
 
 # This will:
-# 1. Generate dataset with hepatotoxic/non-hepatotoxic compounds
-# 2. Calculate all 531 descriptors
-# 3. Perform GA feature selection
+# 1. Load your compound dataset from datasets/my_compounds.csv
+# 2. Calculate all 531 descriptors with QSAR filtering
+# 3. Perform GA feature selection (10 runs)
 # 4. Train SVM models with optimal features
-# 5. Output performance metrics
+# 5. Output performance metrics and selected features
 ```
 
 ### 3. Make Predictions
@@ -206,12 +262,14 @@ Performance is slightly lower than original due to missing VolSurf+ descriptors,
 ```
 jazz/
 ├── hepatotox_descriptors_improved.py  # Descriptor calculator (531 descriptors)
-├── train_M1_improved_with_filters.R   # GA-SVM training script
+├── train_M1_from_csv.R                # GA-SVM training script
 ├── preprocess_molecules.py            # Molecule standardization
-├── feature_selection.py               # Optional QSAR filters
+├── feature_selection.py               # QSAR molecular filters
 ├── hepatotox_app.R                    # Shiny web interface
 ├── DESCRIPTOR_COMPARISON.md           # Detailed descriptor mapping
 ├── GA_SVM_RESULTS_SUMMARY.md          # Training results summary
+├── datasets/                          # Data files
+│   └── compounds_data_example.csv     # Example CSV format (10 compounds)
 └── tx5b00465_si_002/                 # Original GA-SVM framework
     ├── GA-SVM_v2.5_main_script.r     # Main orchestration script
     ├── GA-SVM_v2.5_functions.r       # Core GA-SVM functions
@@ -244,7 +302,57 @@ The pipeline uses the original GA-SVM v2.5 framework from Mulliner et al. (2016)
 5. **GA-SVM_v2.5_GA_run.r**: Executes genetic algorithm optimization
 6. **GA-SVM_v2.5_evaluate.r**: Evaluates models and generates output
 
-The training script `train_M1_improved_with_filters.R` automatically configures and calls this framework with appropriate parameters for hepatotoxicity prediction.
+The training script `train_M1_from_csv.R` automatically configures and calls this framework with appropriate parameters for hepatotoxicity prediction, including:
+
+**Built-in Features:**
+- **QSAR molecular filters**: Enabled by default (removes problematic molecules)
+- **Statistical descriptor filters**: Available but disabled by default (removes low-variance/correlated descriptors)
+- **Preprocessing**: Molecule standardization and salt removal
+- **GA-SVM parameters**: Optimized settings (nu=0.7, gamma=0.01, RBF kernel, 50 population, 20 iterations, 10 runs)
+- **Flexible input**: Reads any CSV file from the `datasets/` folder
+
+## Data Input and Organization
+
+### CSV Data Format
+
+The pipeline supports flexible CSV input for training hepatotoxicity models. Your CSV file must contain three required columns:
+
+| Column | Type | Description | Example |
+|--------|------|-------------|---------|
+| `ID` | String | Unique compound identifier | `ACETAMINOPHEN` |
+| `SMILES` | String | Valid SMILES string | `CC(=O)NC1=CC=C(C=C1)O` |
+| `Hepatotoxic` | Integer | Toxicity label: 1=toxic, 0=safe | `1` |
+
+### Dataset Requirements
+
+- **Minimum size**: 6 compounds (3 toxic, 3 non-toxic) for proper splitting
+- **Recommended size**: 50+ compounds for robust model training
+- **Balance**: Aim for 30-70% toxic compounds (not too imbalanced)
+- **Quality**: Ensure SMILES strings are valid and standardized
+
+### File Organization
+
+All data files are organized in the `datasets/` folder:
+
+```
+datasets/
+├── compounds_data_example.csv         # Example input format (10 compounds)
+├── my_compounds.csv                   # Your input data
+├── my_model_descriptors.desc          # Calculated molecular descriptors
+├── my_model_toxicity.txt              # Toxicity labels
+├── my_model_split.txt                 # Train/test/validation split
+└── hepatotoxicity_*.{desc,txt}        # Files from built-in test data
+```
+
+### Data Validation
+
+The pipeline automatically validates your input data:
+
+- Checks for required columns (`ID`, `SMILES`, `Hepatotoxic`)
+- Validates SMILES strings using RDKit
+- Warns about class imbalance issues
+- Removes compounds with invalid SMILES
+- Reports preprocessing statistics
 
 ## Key Features
 
@@ -292,9 +400,18 @@ This implementation is provided for research purposes. The original GA-SVM frame
 
 ### Common Issues
 
+#### General Issues
 1. **RDKit ImportError**: Ensure RDKit is properly installed via conda
 2. **FractionCsp3 Error**: Update RDKit to latest version or use the provided fallback
 3. **3D Descriptor Failures**: Normal for some molecules; 2D descriptors still calculated
+
+#### CSV Input Issues
+4. **"Input file not found"**: Ensure CSV file is in the `datasets/` folder
+5. **"Missing required columns"**: CSV must have `ID`, `SMILES`, `Hepatotoxic` columns
+6. **"All compounds must have valid SMILES"**: Check for empty SMILES strings or special characters
+7. **"Not enough compounds for splitting"**: Need minimum 6 compounds (3 toxic, 3 safe)
+8. **Class imbalance warning**: Consider adding more compounds to balance toxic/non-toxic ratio
+9. **"Could not parse SMILES"**: Invalid SMILES strings are automatically removed from analysis
 
 ### Support
 
